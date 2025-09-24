@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Reclassification Paperwork PDF Processor
+Simple Reclassification Paperwork PDF Processor
 
-This script processes reclassification paperwork PDFs by:
+Processes reclassification paperwork PDFs by:
 1. Reading PDFs from the 'in' folder
 2. Extracting student information and document types
-3. Grouping documents by Student ID
+3. Splitting multi-student documents properly
 4. Creating combined PDFs for each student
 5. Saving results to the 'out' folder
-
-Based on the SLUSD-API IEP processing architecture.
 """
 
 import os
@@ -35,13 +33,13 @@ class DocumentInfo:
     student_id: str
     student_name: str
     document_type: str
-    pages: List[int]  # Page numbers in the original PDF
+    pages: List[int]
     page_count: int
 
 class ReclassificationProcessor:
     """Main processor for reclassification paperwork"""
     
-    # Document type patterns and identifiers
+    # Document type patterns
     DOCUMENT_PATTERNS = {
         'teacher_recommendation': {
             'pattern': r'Teacher Evaluation for Reclassification|Criteria 2: Teacher Evaluation',
@@ -65,41 +63,26 @@ class ReclassificationProcessor:
         self.input_dir.mkdir(exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
         
-        logger.info(f"Initialized processor with input: {self.input_dir}, output: {self.output_dir}")
+        logger.info(f"Initialized processor - Input: {self.input_dir}, Output: {self.output_dir}")
     
     def process_pdfs(self) -> Dict[str, List[DocumentInfo]]:
-        """
-        Process all PDFs in the input directory
-        Returns: Dictionary mapping student_id to list of their documents
-        """
-        logger.info("Starting PDF processing...")
-        
-        # Find all PDF files in input directory
+        """Process all PDF files in the input directory"""
         pdf_files = list(self.input_dir.glob("*.pdf"))
         if not pdf_files:
             logger.warning(f"No PDF files found in {self.input_dir}")
             return {}
         
-        logger.info(f"Found {len(pdf_files)} PDF file(s) to process")
-        
         all_documents = []
-        
-        # Process each PDF file
         for pdf_file in pdf_files:
-            logger.info(f"Processing: {pdf_file.name}")
-            documents = self._extract_documents_from_pdf(pdf_file)
+            logger.info(f"Processing {pdf_file.name}...")
+            documents = self._process_pdf_file(pdf_file)
             all_documents.extend(documents)
-            logger.info(f"Extracted {len(documents)} document(s) from {pdf_file.name}")
         
-        # Group documents by student ID
-        student_documents = self._group_by_student(all_documents)
-        
-        logger.info(f"Found documents for {len(student_documents)} student(s)")
-        
-        return student_documents
+        # Group documents by student
+        return self._group_by_student(all_documents)
     
-    def _extract_documents_from_pdf(self, pdf_path: Path) -> List[DocumentInfo]:
-        """Extract individual documents from a PDF file"""
+    def _process_pdf_file(self, pdf_path: Path) -> List[DocumentInfo]:
+        """Process a single PDF file and extract document information"""
         documents = []
         
         try:
@@ -107,70 +90,63 @@ class ReclassificationProcessor:
                 reader = PyPDF2.PdfReader(file)
                 total_pages = len(reader.pages)
                 
-                logger.info(f"Scanning {total_pages} pages in {pdf_path.name}")
+                logger.info(f"Processing {pdf_path.name} - {total_pages} pages")
                 
-                current_doc = None
-                current_pages = []
+                # Find all pages with student IDs
+                student_page_map = {}
                 
                 for page_num in range(total_pages):
                     try:
                         page = reader.pages[page_num]
                         text = page.extract_text()
+                        page_info = self._identify_document_and_student(text)
                         
-                        # Check if this page starts a new document
-                        doc_info = self._identify_document_type(text)
-                        
-                        if doc_info:
-                            # Save previous document if it exists
-                            if current_doc and current_pages:
-                                documents.append(DocumentInfo(
-                                    file_path=str(pdf_path),
-                                    student_id=current_doc['student_id'],
-                                    student_name=current_doc['student_name'],
-                                    document_type=current_doc['document_type'],
-                                    pages=current_pages.copy(),
-                                    page_count=len(current_pages)
-                                ))
+                        if page_info:
+                            student_id = page_info['student_id']
+                            if student_id not in student_page_map:
+                                student_page_map[student_id] = []
                             
-                            # Start new document
-                            current_doc = doc_info
-                            current_pages = [page_num]
+                            student_page_map[student_id].append({
+                                'page_num': page_num,
+                                'doc_type': page_info['document_type'],
+                                'student_name': page_info['student_name']
+                            })
                             
-                            logger.info(f"Found {doc_info['document_type']} for student {doc_info['student_id']} ({doc_info['student_name']}) on page {page_num + 1}")
-                        
-                        elif current_doc:
-                            # Continue current document
-                            current_pages.append(page_num)
+                            logger.debug(f"Page {page_num + 1}: {page_info['document_type']} for {student_id}")
                     
                     except Exception as e:
-                        logger.warning(f"Error processing page {page_num + 1} in {pdf_path.name}: {e}")
+                        logger.error(f"Error processing page {page_num + 1}: {e}")
                         continue
                 
-                # Don't forget the last document
-                if current_doc and current_pages:
-                    documents.append(DocumentInfo(
-                        file_path=str(pdf_path),
-                        student_id=current_doc['student_id'],
-                        student_name=current_doc['student_name'],
-                        document_type=current_doc['document_type'],
-                        pages=current_pages.copy(),
-                        page_count=len(current_pages)
-                    ))
+                # Assign unassigned pages to students
+                documents = self._create_documents_from_student_pages(pdf_path, student_page_map, total_pages)
         
         except Exception as e:
             logger.error(f"Error processing {pdf_path}: {e}")
-        finally:
-            # Ensure we always return something, even if empty
-            logger.debug(f"Completed processing {pdf_path.name}, found {len(documents)} documents")
         
         return documents
     
-    def _identify_document_type(self, text: str) -> Optional[Dict[str, str]]:
-        """
-        Identify document type and extract student information from page text
-        Returns: Dict with document_type, student_id, student_name or None
-        """
-        # Check for document type patterns
+    def _normalize_ligatures(self, text: str) -> str:
+        """Normalize ligatures and special characters to standard ASCII"""
+        # Common ligatures that appear in PDFs
+        replacements = {
+            'ﬁ': 'fi',  # fi ligature
+            'ﬂ': 'fl',  # fl ligature
+            'ﬀ': 'ff',  # ff ligature
+            'ﬃ': 'ffi', # ffi ligature
+            'ﬄ': 'ffl', # ffl ligature
+        }
+        for ligature, replacement in replacements.items():
+            text = text.replace(ligature, replacement)
+        return text
+    
+    def _identify_document_and_student(self, text: str) -> Optional[Dict[str, str]]:
+        """Identify document type and extract student information"""
+        
+        # Normalize ligatures first
+        text = self._normalize_ligatures(text)
+        
+        # Find document type
         document_type = None
         for doc_key, doc_info in self.DOCUMENT_PATTERNS.items():
             if re.search(doc_info['pattern'], text, re.IGNORECASE):
@@ -180,82 +156,44 @@ class ReclassificationProcessor:
         if not document_type:
             return None
         
-        # Debug: Show first part of text for notification documents
-        if document_type == 'Notification of English Language Program Exit':
-            logger.debug(f"Processing notification document. First 500 chars: {repr(text[:500])}")
-        
-        # Extract student ID - look for various patterns in multiple languages
+        # Find student ID
         student_id_patterns = [
-            # English patterns
-            r'Student ID#:\s*(\d{6})',    # Notification format: "Student ID#: 106874"
-            r'Student ID#:\s*(\d{5})',    # Notification format 5-digit
-            r'Student ID[#:\s]*(\d{6})',  # Standard format
-            r'Student ID[#:\s]*(\d{5})',  # 5-digit format
-            r'ID[#:\s]*(\d{6})',         # Shortened format
-            r'ID[#:\s]*(\d{5})',         # Shortened 5-digit format
-            
-            # Chinese patterns
-            r'学号[#:\s]*(\d{6})',        # Chinese: "学号: 106874"
-            r'学号[#:\s]*(\d{5})',        # Chinese 5-digit
-            r'学生编号[#:\s]*(\d{6})',     # Chinese alternative
-            r'学生编号[#:\s]*(\d{5})',     # Chinese alternative 5-digit
-            
-            # Spanish patterns  
-            r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{6})',  # Spanish long form
-            r'N°\s*de\s*identiﬁcación\s*del\s*estudiante\s*:\s*(\d{6})',  # Spanish long form
-            r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{5})',  # Spanish long form 5-digit
-            r'ID\s*del\s*estudiante[#:\s]*(\d{6})',  # Spanish short form
-            r'ID\s*del\s*estudiante[#:\s]*(\d{5})',  # Spanish short form 5-digit
-            
-            # Generic number patterns (last resort)
-            r'(?:ID|编号|学号).*?(\d{6})',   # Any ID-like word followed by 6 digits
-            r'(?:ID|编号|学号).*?(\d{5})',   # Any ID-like word followed by 5 digits
+            r'Student ID#?\s*:?\s*(\d{6})',
+            r'Student ID#?\s*:?\s*(\d{5})',
+            r'Student ID[#:\s]*(\d{6})',
+            r'Student ID[#:\s]*(\d{5})',
+            r'学号[#:\s]*(\d{6})',
+            r'学号[#:\s]*(\d{5})',
+            r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{6})',
+            r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{5})',
         ]
         
         student_id = None
-        for i, pattern in enumerate(student_id_patterns):
+        for pattern in student_id_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 student_id = match.group(1)
-                if document_type == 'Notification of English Language Program Exit':
-                    logger.debug(f"Found Student ID using pattern {i+1}: '{pattern}' -> '{student_id}'")
                 break
         
         if not student_id:
-            # Debug: Show more text if student ID not found in notification documents
-            if document_type == 'Notification of English Language Program Exit':
-                logger.debug(f"Student ID not found. Full text preview: {repr(text[:1000])}")
-            logger.warning(f"Could not extract student ID from document of type: {document_type}")
             return None
         
-        # Extract student name - look for various patterns in multiple languages
+        # Find student name
         name_patterns = [
-            # English patterns
-            r'Student:\s*([A-Za-z\s]+?)(?:\s+Student ID|$|\n)',  # Notification format: "Student: Borui Hu"
-            r'(?:Name|Student)[:\s]+([A-Za-z\s]+?)(?:\s+Student|\s+Grade|\n)',
-            r'Name[:\s]+(.+?)(?:\s+Student ID|$)',
-            r'Student[:\s]+([A-Za-z\s]+?)(?:\s+Grade|\s+Student ID|\n)',
-            
-            # Chinese patterns
-            r'学生[:\s]*([A-Za-z\s\u4e00-\u9fff]+?)(?:\s+学号|\s+等级|\n)',  # "学生: Name"
-            r'姓名[:\s]*([A-Za-z\s\u4e00-\u9fff]+?)(?:\s+学号|\s+等级|\n)',  # "姓名: Name"
-            
-            # Spanish patterns
-            r'(?:Nombre|Estudiante)[:\s]+([A-Za-z\s]+?)(?:\s+Grado|\s+N°|\n)',  # "Nombre: Name"
-            r'Estudiante[:\s]+([A-Za-z\s]+?)(?:\s+Grado|\s+ID|\n)',  # "Estudiante: Name"
-            
-            # Generic patterns for names that appear before ID numbers
-            r'([A-Za-z\s\u4e00-\u9fff]{3,30})(?:\s+(?:Student\s*)?ID[#:\s]*\d{5,6})',  # Name followed by ID
+            r'Name:\s*([A-Za-z\s]+?)(?:\s+Student ID|\n)',
+            r'Student:\s*([A-Za-z\s]+?)(?:\s+Student ID|\n)',
+            r'学生[:\s]*([A-Za-z\s\u4e00-\u9fff]+?)(?:\s+学号|\n)',
+            r'Nombre[:\s]+([A-Za-z\s]+?)(?:\s+Grado|\s+N°|\n)',
+            r'([A-Za-z][A-Za-z\s]{2,30})\s+Student ID\s+' + student_id,
         ]
         
         student_name = "Unknown"
         for pattern in name_patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 name = match.group(1).strip()
-                # Clean up the name (remove extra whitespace, etc.)
                 name = re.sub(r'\s+', ' ', name)
-                if name and len(name) > 2:  # Basic validation
+                if len(name) > 2:
                     student_name = name
                     break
         
@@ -265,26 +203,193 @@ class ReclassificationProcessor:
             'student_name': student_name
         }
     
+    def _create_documents_from_student_pages(self, pdf_path: Path, student_page_map: Dict, total_pages: int) -> List[DocumentInfo]:
+        """Create DocumentInfo objects from student page mappings"""
+        documents = []
+        
+        # Sort students by first page appearance
+        sorted_students = sorted(student_page_map.items(), 
+                               key=lambda x: min(p['page_num'] for p in x[1]))
+        
+        # First, determine safe boundaries for each student
+        student_boundaries = {}
+        for i, (student_id, pages) in enumerate(sorted_students):
+            identified_pages = [p['page_num'] for p in pages]
+            min_page = min(identified_pages)
+            max_page = max(identified_pages)
+            
+            # Determine safe upper boundary
+            if i + 1 < len(sorted_students):
+                # There's a next student - boundary is just before their first page
+                next_student_pages = [p['page_num'] for p in sorted_students[i + 1][1]]
+                next_min = min(next_student_pages)
+                safe_upper_bound = next_min - 1
+            else:
+                # Last student - extend to end of document
+                safe_upper_bound = total_pages - 1
+            
+            student_boundaries[student_id] = {
+                'min_page': min_page,
+                'max_page': max_page,
+                'safe_upper_bound': safe_upper_bound
+            }
+            
+            logger.debug(f"Student {student_id}: pages {identified_pages}, safe boundary: {min_page}-{safe_upper_bound}")
+        
+        # Now assign continuation/translation pages more carefully
+        all_identified_pages = set()
+        for pages in student_page_map.values():
+            all_identified_pages.update(p['page_num'] for p in pages)
+        
+        for student_id, pages in student_page_map.items():
+            boundaries = student_boundaries[student_id]
+            
+            # Group pages by document type
+            doc_groups = {}
+            for page_info in pages:
+                doc_type = page_info['doc_type']
+                if doc_type not in doc_groups:
+                    doc_groups[doc_type] = []
+                doc_groups[doc_type].append(page_info['page_num'])
+            
+            # Look for unassigned continuation/translation pages within safe boundaries
+            for page_num in range(boundaries['min_page'], boundaries['safe_upper_bound'] + 1):
+                if page_num not in all_identified_pages:
+                    # Check if this is a continuation/translation page for the current student
+                    page_student_info = self._check_page_belongs_to_student(pdf_path, page_num, student_id)
+                    
+                    if page_student_info:
+                        # This page belongs to this student (could be translation or continuation)
+                        # Find the most appropriate document type to assign it to
+                        if doc_groups:
+                            # Get the document type with the highest page number before this unassigned page
+                            best_doc_type = None
+                            best_distance = float('inf')
+                            
+                            for doc_type, doc_pages in doc_groups.items():
+                                relevant_pages = [p for p in doc_pages if p < page_num]
+                                if relevant_pages:
+                                    distance = page_num - max(relevant_pages)
+                                    if distance < best_distance:
+                                        best_distance = distance
+                                        best_doc_type = doc_type
+                            
+                            # For notification documents, be more liberal with continuation pages (translations)
+                            max_distance = 3 if best_doc_type == 'Notification of English Language Program Exit' else 1
+                            
+                            if best_doc_type and best_distance <= max_distance:
+                                doc_groups[best_doc_type].append(page_num)
+                                all_identified_pages.add(page_num)
+                                logger.debug(f"Assigned continuation/translation page {page_num + 1} to {student_id} - {best_doc_type}")
+            
+            # Create DocumentInfo for each document type
+            for doc_type, page_list in doc_groups.items():
+                if page_list:
+                    student_name = pages[0]['student_name']
+                    documents.append(DocumentInfo(
+                        file_path=str(pdf_path),
+                        student_id=student_id,
+                        student_name=student_name,
+                        document_type=doc_type,
+                        pages=sorted(page_list),
+                        page_count=len(page_list)
+                    ))
+                    logger.info(f"Created {doc_type} for {student_id} ({student_name}) - pages {sorted(page_list)}")
+        
+        return documents
+    
+    def _check_page_belongs_to_student(self, pdf_path: Path, page_num: int, student_id: str) -> bool:
+        """Check if a page belongs to a specific student (includes translations)"""
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                if page_num < len(reader.pages):
+                    page = reader.pages[page_num]
+                    text = page.extract_text()
+                    
+                    # Normalize ligatures
+                    text = self._normalize_ligatures(text)
+                    
+                    # Check if this page has the student's ID
+                    student_id_patterns = [
+                        rf'Student ID[#:\s]*{student_id}',
+                        rf'学号[#:\s]*{student_id}',
+                        rf'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*{student_id}',
+                    ]
+                    
+                    for pattern in student_id_patterns:
+                        if re.search(pattern, text, re.IGNORECASE):
+                            return True
+                    
+                    # Check for translation markers that indicate continuation
+                    # (Chinese, Spanish versions without student ID but same document)
+                    translation_markers = [
+                        r'退出英语教学计划的通知',  # Chinese notification
+                        r'Notificación de salida del programa de idioma inglés',  # Spanish notification
+                        r'学生信息',  # Chinese "Student Information"
+                        r'Información del estudiante',  # Spanish "Student Information"
+                    ]
+                    
+                    for marker in translation_markers:
+                        if re.search(marker, text, re.IGNORECASE):
+                            # This is likely a translation page, check if it's continuation
+                            return True
+                    
+                    # If page has signature-related content but no new student ID, likely continuation
+                    if re.search(r'signature|parent.*guardian|consulta', text, re.IGNORECASE):
+                        if not re.search(r'Student ID[#:\s]*\d{5,6}', text, re.IGNORECASE):
+                            return True
+        except:
+            pass
+        
+        return False
+    
+    def _is_likely_continuation_page(self, pdf_path: Path, page_num: int) -> bool:
+        """Check if a page is likely a continuation page (no new student ID or document type)"""
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                if page_num < len(reader.pages):
+                    page = reader.pages[page_num]
+                    text = page.extract_text()
+                    
+                    # Normalize ligatures
+                    text = self._normalize_ligatures(text)
+                    
+                    # If page has a student ID, it's not a continuation page
+                    if re.search(r'Student ID[#:\s]*\d{5,6}', text, re.IGNORECASE):
+                        return False
+                    
+                    # If page has a document type header, it's not a continuation page
+                    for doc_info in self.DOCUMENT_PATTERNS.values():
+                        if re.search(doc_info['pattern'], text, re.IGNORECASE):
+                            return False
+                    
+                    # If it has signature-related content, it might be a continuation
+                    if re.search(r'signature|sign|date|agree|disagree', text, re.IGNORECASE):
+                        return True
+                    
+                    # If it's mostly empty or very short, might be continuation
+                    return len(text.strip()) < 200
+        except:
+            pass
+        
+        return False
+    
     def _group_by_student(self, documents: List[DocumentInfo]) -> Dict[str, List[DocumentInfo]]:
         """Group documents by student ID"""
         student_docs = {}
-        
         for doc in documents:
             if doc.student_id not in student_docs:
                 student_docs[doc.student_id] = []
             student_docs[doc.student_id].append(doc)
-        
         return student_docs
     
     def create_combined_pdfs(self, student_documents: Dict[str, List[DocumentInfo]]) -> Tuple[List[str], List[Dict]]:
-        """
-        Create combined PDFs for students with complete document sets
-        Returns: Tuple of (created_file_paths, incomplete_students)
-        """
+        """Create combined PDFs for students with complete document sets"""
         created_files = []
         incomplete_students = []
         
-        # Required document types
         required_docs = {
             'Teacher Recommendation Form',
             'Reclassification Meeting', 
@@ -292,244 +397,103 @@ class ReclassificationProcessor:
         }
         
         for student_id, docs in student_documents.items():
-            if not docs:
-                continue
+            student_name = docs[0].student_name if docs else "Unknown"
+            found_doc_types = {doc.document_type for doc in docs}
             
-            # Get student name from the first document
-            student_name = docs[0].student_name
-            
-            # Check if student has all required documents
-            student_doc_types = {doc.document_type for doc in docs}
-            missing_docs = required_docs - student_doc_types
-            
-            if missing_docs:
-                # Student is missing required documents
+            if required_docs.issubset(found_doc_types):
+                # Complete set - create combined PDF
+                try:
+                    output_filename = f"{student_id}_{student_name.replace(' ', '_')}_Reclassification_Complete.pdf"
+                    output_path = self.output_dir / output_filename
+                    
+                    # Sort documents in proper order
+                    sorted_docs = self._sort_documents_by_priority(docs)
+                    
+                    # Combine PDFs
+                    self._combine_documents(sorted_docs, output_path)
+                    created_files.append(str(output_path))
+                    
+                    logger.info(f"Created complete PDF for {student_name} (ID: {student_id}): {output_filename}")
+                
+                except Exception as e:
+                    logger.error(f"Error creating combined PDF for student {student_id}: {e}")
+                    incomplete_students.append({
+                        'student_id': student_id,
+                        'student_name': student_name,
+                        'error': str(e),
+                        'found_documents': list(found_doc_types),
+                        'missing_documents': [],
+                        'total_pages': sum(doc.page_count for doc in docs)
+                    })
+            else:
+                # Incomplete set
+                missing_docs = required_docs - found_doc_types
                 incomplete_students.append({
                     'student_id': student_id,
                     'student_name': student_name,
-                    'found_documents': list(student_doc_types),
+                    'found_documents': list(found_doc_types),
                     'missing_documents': list(missing_docs),
                     'total_pages': sum(doc.page_count for doc in docs)
                 })
-                logger.warning(f"Student {student_id} ({student_name}) missing: {', '.join(missing_docs)}")
-                continue
-            
-            logger.info(f"Creating combined PDF for student {student_id} ({student_name}) with complete document set")
-            
-            # Sort documents in the specified order
-            ordered_docs = self._order_documents(docs)
-            
-            # Create combined PDF
-            output_filename = f"Reclassification Paperwork - ID# {student_id}.pdf"
-            output_path = self.output_dir / output_filename
-            
-            try:
-                self._combine_documents(ordered_docs, output_path)
-                created_files.append(str(output_path))
-                logger.info(f"Created: {output_filename}")
-            except Exception as e:
-                logger.error(f"Error creating PDF for student {student_id}: {e}")
-                # Move to incomplete list if processing fails
-                incomplete_students.append({
-                    'student_id': student_id,
-                    'student_name': student_name,
-                    'found_documents': list(student_doc_types),
-                    'missing_documents': [],
-                    'error': str(e),
-                    'total_pages': sum(doc.page_count for doc in docs)
-                })
-            finally:
-                # Ensure any cleanup is done even if creation fails
-                pass
+                
+                logger.warning(f"Incomplete paperwork for {student_name} (ID: {student_id}). Missing: {', '.join(missing_docs)}")
         
         return created_files, incomplete_students
     
-    def _order_documents(self, docs: List[DocumentInfo]) -> List[DocumentInfo]:
-        """
-        Order documents according to the specified sequence:
-        1. Teacher Recommendation Form
-        2. Reclassification Meeting
-        3. Notification of English Language Program Exit
-        """
+    def _sort_documents_by_priority(self, docs: List[DocumentInfo]) -> List[DocumentInfo]:
+        """Sort documents in the required order"""
         order_priority = {
             'Teacher Recommendation Form': 1,
             'Reclassification Meeting': 2,
             'Notification of English Language Program Exit': 3
         }
         
-        # Sort by priority, then by document type name for consistency
         return sorted(docs, key=lambda x: (order_priority.get(x.document_type, 999), x.document_type))
     
-    def _create_error_report(self, incomplete_students: List[Dict]) -> Optional[str]:
-        """
-        Create an error report for students with incomplete document sets
-        Returns: Path to error report file or None if no errors
-        """
-        if not incomplete_students:
-            return None
-        
-        error_report_path = self.output_dir / "INCOMPLETE_PAPERWORK_REPORT.txt"
-        
-        try:
-            with open(error_report_path, 'w') as f:
-                f.write("RECLASSIFICATION PAPERWORK - INCOMPLETE SETS REPORT\n")
-                f.write("=" * 60 + "\n")
-                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                
-                f.write(f"SUMMARY: {len(incomplete_students)} student(s) with incomplete paperwork\n")
-                f.write("-" * 60 + "\n\n")
-                
-                required_docs = [
-                    "Teacher Recommendation Form",
-                    "Reclassification Meeting", 
-                    "Notification of English Language Program Exit"
-                ]
-                
-                for i, student in enumerate(incomplete_students, 1):
-                    f.write(f"{i}. STUDENT ID: {student['student_id']}\n")
-                    f.write(f"   Name: {student['student_name']}\n")
-                    
-                    if student.get('error'):
-                        f.write(f"   ❌ Processing Error: {student['error']}\n")
-                    else:
-                        f.write(f"   📄 Found Documents ({len(student['found_documents'])}):\n")
-                        for doc in student['found_documents']:
-                            f.write(f"      ✅ {doc}\n")
-                        
-                        f.write(f"   ❌ Missing Documents ({len(student['missing_documents'])}):\n")
-                        for doc in student['missing_documents']:
-                            f.write(f"      ❌ {doc}\n")
-                    
-                    f.write(f"   📊 Total Pages Found: {student.get('total_pages', 0)}\n")
-                    f.write("\n" + "-" * 40 + "\n\n")
-                
-                # Summary by document type
-                f.write("MISSING DOCUMENTS SUMMARY:\n")
-                f.write("-" * 30 + "\n")
-                
-                missing_count = {}
-                for student in incomplete_students:
-                    for missing_doc in student.get('missing_documents', []):
-                        missing_count[missing_doc] = missing_count.get(missing_doc, 0) + 1
-                
-                for doc_type in required_docs:
-                    count = missing_count.get(doc_type, 0)
-                    f.write(f"• {doc_type}: {count} student(s) missing\n")
-                
-                f.write(f"\nNOTE: Only students with ALL THREE required documents will have combined PDFs created.\n")
-                f.write(f"Please ensure all required paperwork is included and reprocess.\n")
-            
-            logger.info(f"Created error report: {error_report_path.name}")
-            return str(error_report_path)
-        except Exception as e:
-            logger.error(f"Error creating error report: {e}")
-            return None
-            
     def _combine_documents(self, docs: List[DocumentInfo], output_path: Path):
         """Combine multiple documents into a single PDF"""
         writer = PyPDF2.PdfWriter()
         
-        try:
-            # Process each document
-            for doc in docs:
-                logger.info(f"  Adding {doc.document_type} ({doc.page_count} pages)")
-                
-                try:
-                    # Open the source PDF
-                    with open(doc.file_path, 'rb') as file:
-                        reader = PyPDF2.PdfReader(file)
-                        
-                        # Add the specified pages
-                        for page_num in doc.pages:
-                            try:
-                                if page_num < len(reader.pages):
-                                    writer.add_page(reader.pages[page_num])
-                                else:
-                                    logger.warning(f"Page {page_num} not found in {doc.file_path}")
-                            except Exception as e:
-                                logger.error(f"Error adding page {page_num} from {doc.file_path}: {e}")
-                                continue
-                                
-                except Exception as e:
-                    logger.error(f"Error reading document {doc.file_path}: {e}")
-                    continue
+        for doc in docs:
+            logger.debug(f"Adding {doc.document_type} for student {doc.student_id} - pages {doc.pages}")
             
-            # Write the combined PDF
             try:
-                with open(output_path, 'wb') as output_file:
-                    writer.write(output_file)
-                logger.debug(f"Successfully wrote combined PDF to {output_path}")
+                with open(doc.file_path, 'rb') as file:
+                    reader = PyPDF2.PdfReader(file)
+                    
+                    for page_num in doc.pages:
+                        if page_num < len(reader.pages):
+                            writer.add_page(reader.pages[page_num])
+                        else:
+                            logger.warning(f"Page {page_num} not found in {doc.file_path}")
+            
             except Exception as e:
-                logger.error(f"Error writing combined PDF to {output_path}: {e}")
-                raise
-                
-        except Exception as e:
-            logger.error(f"Error combining documents: {e}")
-            raise
-        finally:
-            # Clean up writer resources if needed
-            if hasattr(writer, 'close'):
-                try:
-                    writer.close()
-                except:
-                    pass
+                logger.error(f"Error reading document {doc.file_path}: {e}")
+                continue
+        
+        # Write combined PDF
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
     
-    def run(self) -> Dict[str, any]:
-        """
-        Main execution method
-        Returns: Summary of processing results
-        """
-        logger.info("=" * 80)
+    def run(self) -> Dict:
+        """Main processing method"""
         logger.info("Starting Reclassification Paperwork Processing")
-        logger.info("=" * 80)
         
         # Process PDFs
         student_documents = self.process_pdfs()
         
         if not student_documents:
             logger.warning("No documents found to process")
-            return {
-                'status': 'NO_DOCUMENTS',
-                'total_students': 0,
-                'created_files': []
-            }
+            return {'status': 'NO_DOCUMENTS', 'total_students': 0, 'created_files': []}
         
-        # Create combined PDFs (only for complete sets)
+        # Create combined PDFs
         created_files, incomplete_students = self.create_combined_pdfs(student_documents)
         
-        # Create error report for incomplete sets
-        error_report_path = self._create_error_report(incomplete_students)
-        
         # Summary
-        logger.info("=" * 80)
-        logger.info("Processing Summary:")
+        logger.info(f"Processing Summary:")
         logger.info(f"Total students found: {len(student_documents)}")
         logger.info(f"Complete sets processed: {len(created_files)}")
         logger.info(f"Incomplete sets: {len(incomplete_students)}")
-        
-        # Show complete students
-        if created_files:
-            logger.info("\n✅ STUDENTS WITH COMPLETE PAPERWORK:")
-            for student_id, docs in student_documents.items():
-                if len({doc.document_type for doc in docs}) == 3:  # Has all 3 required docs
-                    student_name = docs[0].student_name if docs else "Unknown"
-                    doc_types = [doc.document_type for doc in docs]
-                    logger.info(f"   Student {student_id} ({student_name}): {len(doc_types)} documents")
-        
-        # Show incomplete students
-        if incomplete_students:
-            logger.info(f"\n❌ STUDENTS WITH INCOMPLETE PAPERWORK ({len(incomplete_students)}):")
-            for student in incomplete_students:
-                if student.get('error'):
-                    logger.info(f"   Student {student['student_id']} ({student['student_name']}): Processing Error")
-                else:
-                    missing = ', '.join(student['missing_documents'])
-                    logger.info(f"   Student {student['student_id']} ({student['student_name']}): Missing {missing}")
-        
-        if error_report_path:
-            logger.info(f"\n📄 Error report created: {Path(error_report_path).name}")
-        
-        logger.info("=" * 80)
         
         return {
             'status': 'SUCCESS' if created_files else 'INCOMPLETE_DOCUMENTS',
@@ -537,12 +501,7 @@ class ReclassificationProcessor:
             'complete_students': len(created_files),
             'incomplete_students': len(incomplete_students),
             'created_files': created_files,
-            'error_report': error_report_path,
             'incomplete_details': incomplete_students,
-            'student_documents': {
-                student_id: [doc.document_type for doc in docs] 
-                for student_id, docs in student_documents.items()
-            }
         }
 
 def main():
@@ -551,25 +510,21 @@ def main():
     results = processor.run()
     
     if results['status'] == 'SUCCESS':
-        print(f"\n✅ Successfully processed {results['complete_students']} student(s) with complete paperwork")
-        print(f"📁 Created {len(results['created_files'])} combined PDF(s)")
+        print(f"Successfully processed {results['complete_students']} student(s) with complete paperwork")
+        print(f"Created {len(results['created_files'])} combined PDF(s)")
         
         if results['incomplete_students'] > 0:
-            print(f"⚠️  {results['incomplete_students']} student(s) had incomplete paperwork")
-            if results['error_report']:
-                print(f"📄 See error report: {Path(results['error_report']).name}")
+            print(f"{results['incomplete_students']} student(s) had incomplete paperwork")
                 
     elif results['status'] == 'INCOMPLETE_DOCUMENTS':
-        print(f"\n⚠️  Found {results['total_students']} student(s) but none had complete paperwork")
-        print(f"❌ {results['incomplete_students']} student(s) missing required documents")
-        if results['error_report']:
-            print(f"📄 See error report: {Path(results['error_report']).name}")
+        print(f"Found {results['total_students']} student(s) but none had complete paperwork")
+        print(f"{results['incomplete_students']} student(s) missing required documents")
             
     elif results['status'] == 'NO_DOCUMENTS':
-        print("\n⚠️  No documents found to process")
-        print("   Make sure PDF files are in the 'in' folder")
+        print("No documents found to process")
+        print("Make sure PDF files are in the 'in' folder")
     else:
-        print(f"\n❌ Processing failed: {results.get('message', 'Unknown error')}")
+        print(f"Processing failed: {results.get('message', 'Unknown error')}")
 
 if __name__ == "__main__":
     main()
