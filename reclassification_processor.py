@@ -21,7 +21,7 @@ import logging
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -50,10 +50,24 @@ class ReclassificationProcessor:
             'title': 'Reclassification Meeting'
         },
         'notification_exit': {
-            'pattern': r'Notification of English Language Program Exit|退出英语教学计划的通知|Notificación de salida del programa de idioma inglés',
+            'pattern': r'Notification of English Language Program Exit',
             'title': 'Notification of English Language Program Exit'
         }
     }
+    # DOCUMENT_PATTERNS = {
+    #     'teacher_recommendation': {
+    #         'pattern': r'Teacher Evaluation for Reclassification|Criteria 2: Teacher Evaluation',
+    #         'title': 'Teacher Recommendation Form'
+    #     },
+    #     'reclassification_meeting': {
+    #         'pattern': r'Reclassification Meeting w/ Parent/Guardian|Alternate Reclassification IEP Meeting',
+    #         'title': 'Reclassification Meeting'
+    #     },
+    #     'notification_exit': {
+    #         'pattern': r'Notification of English Language Program Exit|退出英语教学计划的通知|Notificación de salida del programa de idioma inglés',
+    #         'title': 'Notification of English Language Program Exit'
+    #     }
+    # }
     
     def __init__(self, input_dir: str = "in", output_dir: str = "out"):
         self.input_dir = Path(input_dir)
@@ -395,9 +409,15 @@ class ReclassificationProcessor:
             'Reclassification Meeting', 
             'Notification of English Language Program Exit'
         }
-        
+        student_name = None
+        student_id = None
+        # for student_id, docs in student_documents.items():
         for student_id, docs in student_documents.items():
-            student_name = docs[0].student_name if docs else "Unknown"
+            for doc in docs:
+                if doc.student_id == student_id and doc.student_name and doc.student_name != "Unknown":
+                    student_name = doc.student_name
+                    break
+            # student_name = docs[0].student_name if docs else "Unknown"
             found_doc_types = {doc.document_type for doc in docs}
             
             if required_docs.issubset(found_doc_types):
@@ -443,9 +463,9 @@ class ReclassificationProcessor:
     def _sort_documents_by_priority(self, docs: List[DocumentInfo]) -> List[DocumentInfo]:
         """Sort documents in the required order"""
         order_priority = {
-            'Teacher Recommendation Form': 1,
+            'Notification of English Language Program Exit': 1,
             'Reclassification Meeting': 2,
-            'Notification of English Language Program Exit': 3
+            'Teacher Recommendation Form': 3,
         }
         
         return sorted(docs, key=lambda x: (order_priority.get(x.document_type, 999), x.document_type))
