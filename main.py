@@ -1,7 +1,25 @@
 import os
 from decouple import config
 from reclassification_processor import ReclassificationProcessor
+import requests
+import json
 
+def upload_created_files(created_files):    
+    data = {"username": config('FAST_API_USERNAME'), "password": config('FAST_API_PASSWORD')}
+    print('Data:', data)
+    token = requests.post(
+        f"{config('FAST_API_URL')}/token",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    ).json()
+    print('Token:', token)
+    for file_path in created_files:
+        student_id = file_path.split('\\')[1].split('_')[0].strip()
+        print(f"Uploading file for student ID: {student_id}")
+        # Simulate upload process
+        # In a real scenario, you would integrate with an API or service here
+        print(f"Uploaded {file_path} successfully.")
+    return created_files
 def main():
     """Main function for standalone execution"""
     processor = ReclassificationProcessor()

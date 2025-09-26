@@ -21,7 +21,7 @@ import logging
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -423,7 +423,7 @@ class ReclassificationProcessor:
             if required_docs.issubset(found_doc_types):
                 # Complete set - create combined PDF
                 try:
-                    output_filename = f"{student_id}_{student_name.replace(' ', '_')}_Reclassification_Complete.pdf"
+                    output_filename = f"{student_id}_{student_name.replace(' ', '_')}_Reclassification_Paperwork.pdf"
                     output_path = self.output_dir / output_filename
                     
                     # Sort documents in proper order
