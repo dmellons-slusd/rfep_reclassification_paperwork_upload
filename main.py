@@ -11,6 +11,11 @@ from reclassification_processor import ReclassificationProcessor
 import requests
 from slusdlib import aeries
 import q_update_rfep as q
+from pandas import read_csv
+
+def get_previously_uploaded_files():
+    previous_ids = read_csv('out/completed_students.csv')['Student ID'].astype(str).tolist()
+    return previous_ids
 
 def upload_created_files(created_files, test_run=True):    
     data = {"username": config('FAST_API_USERNAME'), "password": config('FAST_API_PASSWORD')}
@@ -19,9 +24,14 @@ def upload_created_files(created_files, test_run=True):
         data=data,
        
     ).json().get('token')
+    previous_student_ids = get_previously_uploaded_files()
     success_files = []
     for file_path in created_files:
         student_id = file_path.split('\\')[1].split('_')[0].strip()
+        
+        if student_id in previous_student_ids:
+            print(f"Skipping upload for student ID {student_id} as it was previously uploaded.")
+            continue
         print(f"Uploading file for student ID: {student_id}")
         response = requests.post(
             f"{config('FAST_API_URL')}/docs/uploadGeneral",
@@ -151,7 +161,7 @@ def main():
         print(f"Successfully processed {results['complete_students']} student(s) with complete paperwork")
         print(f"Created {len(results['created_files'])} combined PDF(s)")
         created_files = results['created_files']
-        upload_created_files(created_files, test_run=True)
+        upload_created_files(created_files, test_run=config('TEST_RUN', default='False', cast=bool))
         
         if results['incomplete_students'] > 0:
             print(f"{results['incomplete_students']} student(s) had incomplete paperwork")
