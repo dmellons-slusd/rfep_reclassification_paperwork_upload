@@ -6,3 +6,4 @@ out/*
 archive/*
 log.log
 SQL/*
+test/

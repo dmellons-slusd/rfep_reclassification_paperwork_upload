@@ -12,12 +12,26 @@ import requests
 from slusdlib import aeries
 import q_update_rfep as q
 from pandas import read_csv
+import csv
 
 def get_previously_uploaded_files():
-    previous_ids = read_csv('out/completed_students.csv')['Student ID'].astype(str).tolist()
-    return previous_ids
+    try:
+        previous_ids = read_csv('out/completed_students.csv')['Student ID'].astype(str).tolist()
+        return previous_ids
+    except FileNotFoundError:
+        return []
 
-def upload_created_files(created_files, test_run=True):    
+def upload_created_files(created_files, test_run=True):
+    """
+    Upload created files and update completed_students.csv with successful uploads
+    
+    Args:
+        created_files: List of file paths to upload
+        test_run: Boolean flag for test mode
+        
+    Returns:
+        List of successfully uploaded files
+    """
     data = {"username": config('FAST_API_USERNAME'), "password": config('FAST_API_PASSWORD')}
     token = requests.post(
         f"{config('FAST_API_URL')}/token",
@@ -26,36 +40,89 @@ def upload_created_files(created_files, test_run=True):
     ).json().get('token')
     previous_student_ids = get_previously_uploaded_files()
     success_files = []
+    newly_uploaded = []
+    
     for file_path in created_files:
         student_id = file_path.split('\\')[1].split('_')[0].strip()
+        
+        # Extract student name from filename
+        # Format: {StudentID}_{FirstName}_{LastName}_Reclassification_Paperwork.pdf
+        filename_parts = os.path.basename(file_path).replace('.pdf', '').split('_')
+        if len(filename_parts) > 3:
+            # Find index of "Reclassification" to know where name ends
+            try:
+                reclass_idx = filename_parts.index('Reclassification')
+                student_name = ' '.join(filename_parts[1:reclass_idx])
+            except ValueError:
+                # Fallback: assume last two parts are "Reclassification" and "Paperwork"
+                student_name = ' '.join(filename_parts[1:-2])
+        else:
+            student_name = 'Unknown'
         
         if student_id in previous_student_ids:
             print(f"Skipping upload for student ID {student_id} as it was previously uploaded.")
             continue
+            
         print(f"Uploading file for student ID: {student_id}")
         response = requests.post(
             f"{config('FAST_API_URL')}/docs/uploadGeneral",
             headers={"Authorization": f"Bearer {token}"},
             files={"file": open(file_path, 'rb')},
             data={
-                
                 "student_id": student_id,
                 "document_name": os.path.basename(file_path).replace('_', ' '),
                 "document_type": "RECLASS",
                 "test_run": test_run
             }
         )
+        
         if response.status_code != 200:
             print(f"Failed to upload {file_path}: {response.text}")
             continue
         else:
             print(f"Successfully uploaded {file_path}: {response.text}")
             success_files.append(file_path)
+            newly_uploaded.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'completed_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'output_file': os.path.basename(file_path)
+            })
+    
+    # Update the completed_students.csv file with newly uploaded students
+    if newly_uploaded:
+        csv_path = Path('out/completed_students.csv')
         
-        # Simulate upload process
-        # In a real scenario, you would integrate with an API or service here
-        print(f"Uploaded {file_path} successfully.")
-    return created_files
+        # Read existing records if file exists
+        existing_students = {}
+        if csv_path.exists():
+            with open(csv_path, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    existing_students[row['Student ID']] = row
+            print(f"\nFound {len(existing_students)} existing completed student records")
+        
+        # Add newly uploaded students (or update if already exists)
+        for student in newly_uploaded:
+            existing_students[student['student_id']] = {
+                'Student ID': student['student_id'],
+                'Student Name': student['student_name'],
+                'Completed Date': student['completed_date'],
+                'Output File': student['output_file']
+            }
+        
+        # Write all records back (sorted by student ID)
+        with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['Student ID', 'Student Name', 'Completed Date', 'Output File']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for student_id in sorted(existing_students.keys()):
+                writer.writerow(existing_students[student_id])
+        
+        print(f"\n✅ Updated completed_students.csv with {len(newly_uploaded)} newly uploaded student(s)")
+        print(f"📊 Total completed students: {len(existing_students)}")
+    
+    return success_files
 
 def get_reclass_date(file_path: str) -> Optional[str]:
     """
@@ -132,26 +199,31 @@ def get_reclass_date(file_path: str) -> Optional[str]:
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return None
+
 def create_rfep_csv(created_files, csv_file_path:str='out/rfep_students.csv'):
-    csv = 'Student #,RFEP Date'
+    """Create CSV file with student IDs and RFEP dates"""
+    csv_content = 'Student #,RFEP Date'
     for file in created_files:
         rfep_date = get_reclass_date(file)
         if rfep_date:
-            csv += f'\n{file.split("\\")[1].split("_")[0]},{rfep_date}'
+            csv_content += f'\n{file.split("\\")[1].split("_")[0]},{rfep_date}'
         else:
-            csv += f'\n{file.split("\\")[1].split("_")[0]},N/A'
-        print(f"Creating RFEP CSV for {file}")
+            csv_content += f'\n{file.split("\\")[1].split("_")[0]},N/A'
+        print(f"Creating RFEP CSV entry for {file}")
     with open(csv_file_path, 'w') as f:
-        f.write(csv)
+        f.write(csv_content)
     return csv_file_path
     
 def archive_processed_files(created_files, archive_folder='archive', csv_file='out/rfep_students.csv'):
+    """Archive processed files and CSV to date-stamped folder"""
     if not os.path.exists(archive_folder):
         os.makedirs(archive_folder)
     for file in created_files:
         shutil.move(file, os.path.join(archive_folder, os.path.basename(file)))
         print(f"Moved {file} to {archive_folder}")
-    shutil.move(csv_file, os.path.join(archive_folder, os.path.basename(csv_file)))    
+    if os.path.exists(csv_file):
+        shutil.move(csv_file, os.path.join(archive_folder, os.path.basename(csv_file)))
+
 def main():
     """Main function for standalone execution"""
     processor = ReclassificationProcessor()
@@ -161,6 +233,8 @@ def main():
         print(f"Successfully processed {results['complete_students']} student(s) with complete paperwork")
         print(f"Created {len(results['created_files'])} combined PDF(s)")
         created_files = results['created_files']
+        
+        # Upload files and track in completed_students.csv
         upload_created_files(created_files, test_run=config('TEST_RUN', default='False', cast=bool))
         
         if results['incomplete_students'] > 0:
@@ -175,19 +249,29 @@ def main():
         print("Make sure PDF files are in the 'in' folder")
     else:
         print(f"Processing failed: {results.get('message', 'Unknown error')}")
+    
+    # Create RFEP CSV for database updates
     csv_file_path = create_rfep_csv(created_files)
     
-    cnxn = aeries.get_aeries_cnxn(access_level='w', database=config('DATABASE') if not config('TEST_RUN', default='False', cast=bool) else f"{config('DATABASE')}_DAILY" if config('TEST_RUN', default='False', cast=bool) else config('DATABASE'))
+    # Update database records
+    cnxn = aeries.get_aeries_cnxn(
+        access_level='w', 
+        database=config('DATABASE') if not config('TEST_RUN', default='False', cast=bool) 
+        else f"{config('DATABASE')}_DAILY"
+    )
     
     updates = process_rfep_list_with_completion_check(
         csv=csv_file_path, 
         cnxn=cnxn,
     )
-    print(f"Processed {len(updates)} RFEP updates in the database")
+    print(f"\nProcessed {len(updates)} RFEP updates in the database")
     print(updates)
-    archive_processed_files(created_files, archive_folder=f'archive/{datetime.today().strftime("%Y-%m-%d")}')
-    # close_lip_records(created_files)     
+    
+    # Archive processed files
+    archive_processed_files(
+        created_files, 
+        archive_folder=f'archive/{datetime.today().strftime("%Y-%m-%d")}'
+    )
 
 if __name__ == "__main__":
-    
     main()
