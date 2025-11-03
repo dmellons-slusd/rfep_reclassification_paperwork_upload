@@ -504,14 +504,22 @@ def main():
                     for row in reader:
                         existing_students[row['Student ID']] = row
             
-            # Add newly uploaded students
+            # Add ONLY newly uploaded students (don't overwrite existing ones)
+            newly_added_count = 0
             for student in newly_uploaded:
-                existing_students[student['student_id']] = {
-                    'Student ID': student['student_id'],
-                    'Student Name': student['student_name'],
-                    'Completed Date': student['completed_date'],
-                    'Output File': student['output_file']
-                }
+                student_id_str = str(student['student_id'])
+                # Only add if not already in the CSV
+                if student_id_str not in existing_students:
+                    existing_students[student_id_str] = {
+                        'Student ID': student_id_str,
+                        'Student Name': student['student_name'],
+                        'Completed Date': student['completed_date'],
+                        'Output File': student['output_file']
+                    }
+                    newly_added_count += 1
+                else:
+                    # Student already exists in CSV, preserve their original completion date
+                    logger.info(f"Student {student_id_str} already in local CSV - preserving original completion date: {existing_students[student_id_str]['Completed Date']}")
             
             # Write all records back (sorted by student ID)
             with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -521,8 +529,8 @@ def main():
                 for student_id in sorted(existing_students.keys()):
                     writer.writerow(existing_students[student_id])
             
-            print(f"✅ Updated local CSV with {len(newly_uploaded)} new student(s)")
-            logger.info(f"Updated local completed_students.csv with {len(newly_uploaded)} new student(s)")
+            print(f"✅ Updated local CSV with {newly_added_count} new student(s)")
+            logger.info(f"Updated local completed_students.csv with {newly_added_count} new student(s)")
         
         # Step 3b: Sync with Google Sheet
         if newly_uploaded:
