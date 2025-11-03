@@ -7,3 +7,5 @@ archive/*
 log.log
 SQL/*
 test/
+creds.json
+polar*.json
