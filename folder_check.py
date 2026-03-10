@@ -19,6 +19,7 @@ from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from slusdlib import core
 
 
 def extract_folder_id(folder_url: str) -> str:
@@ -85,26 +86,28 @@ def is_service_account_json(creds_file: str) -> bool:
 def get_google_drive_service_with_service_account(creds_file: str):
     """
     Create Google Drive service using Service Account credentials.
-    
+
     Best for: Automated processes, server-side applications
-    
+
     Args:
         creds_file: Path to service account JSON file
-        
+
     Returns:
         Google Drive service object
     """
     print("🔐 Using Service Account authentication (automated mode)")
-    
+    core.log("Google Drive: Using Service Account authentication")
+
     # Use full drive scope to allow file operations (download, move, create folders)
     SCOPES = ['https://www.googleapis.com/auth/drive']
-    
+
     credentials = service_account.Credentials.from_service_account_file(
-        creds_file, 
+        creds_file,
         scopes=SCOPES
     )
-    
+
     service = build('drive', 'v3', credentials=credentials)
+    core.log("Google Drive: Service account authentication successful")
     return service
 
 
@@ -185,21 +188,22 @@ def get_google_drive_service():
 def count_pdfs_in_folder(service, folder_id: str) -> dict:
     """
     Count the number of PDF files in a Google Drive folder.
-    
+
     Args:
         service: Google Drive service object
         folder_id: The ID of the folder to check
-        
+
     Returns:
         dict: Information about PDFs in the folder
     """
     try:
+        core.log(f"Google Drive: Searching for PDFs in folder {folder_id}")
         # Query to find all PDF files in the specified folder
         query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-        
+
         pdf_files = []
         page_token = None
-        
+
         while True:
             # List files in the folder
             results = service.files().list(
@@ -209,70 +213,75 @@ def count_pdfs_in_folder(service, folder_id: str) -> dict:
                 pageToken=page_token,
                 pageSize=100  # Retrieve up to 100 files per request
             ).execute()
-            
+
             files = results.get('files', [])
             pdf_files.extend(files)
-            
+
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
-        
+
         # Calculate total size
         total_size = sum(int(f.get('size', 0)) for f in pdf_files)
-        
+
+        core.log(f"Google Drive: Found {len(pdf_files)} PDF file(s) ({round(total_size / (1024 * 1024), 2)} MB)")
+
         return {
             'count': len(pdf_files),
             'files': pdf_files,
             'total_size_bytes': total_size,
             'total_size_mb': round(total_size / (1024 * 1024), 2)
         }
-        
+
     except HttpError as error:
+        core.log(f"ERROR: Google Drive access error: {error}")
         raise Exception(f"Error accessing Google Drive: {error}")
 
 
 def download_pdf(service, file_id: str, file_name: str, destination_folder: str = './in') -> str:
     """
     Download a PDF file from Google Drive to local folder.
-    
+
     Args:
         service: Google Drive service object
         file_id: The ID of the file to download
         file_name: The name of the file
         destination_folder: Local folder to save the file (default: './in')
-        
+
     Returns:
         str: Path to the downloaded file
     """
     try:
         import io
         from googleapiclient.http import MediaIoBaseDownload
-        
+
         # Create destination folder if it doesn't exist
         os.makedirs(destination_folder, exist_ok=True)
-        
+
         # Get file content
         request = service.files().get_media(fileId=file_id)
-        
+
         # Prepare file path
         file_path = os.path.join(destination_folder, file_name)
-        
+
         # Download file
         fh = io.FileIO(file_path, 'wb')
         downloader = MediaIoBaseDownload(fh, request)
-        
+
         done = False
         while done is False:
             status, done = downloader.next_chunk()
             if status:
                 progress = int(status.progress() * 100)
                 print(f"  📥 Downloading {file_name}: {progress}%", end='\r')
-        
+
         print(f"  ✅ Downloaded: {file_name}" + " " * 20)  # Clear progress line
-        
+        core.log(f"Google Drive: Downloaded {file_name}")
+
         return file_path
-        
+
     except HttpError as error:
+        core.log(f"ERROR: Failed to download {file_name}: {error}")
         raise Exception(f"Error downloading file {file_name}: {error}")
 
 
@@ -329,7 +338,7 @@ def create_or_get_dated_folder(service, parent_folder_id: str, date_str: str) ->
 def move_file_to_folder(service, file_id: str, file_name: str, source_folder_id: str, destination_folder_id: str):
     """
     Move a file from one folder to another in Google Drive.
-    
+
     Args:
         service: Google Drive service object
         file_id: The ID of the file to move
@@ -343,9 +352,9 @@ def move_file_to_folder(service, file_id: str, file_name: str, source_folder_id:
             fileId=file_id,
             fields='parents'
         ).execute()
-        
+
         previous_parents = ",".join(file.get('parents', []))
-        
+
         # Move the file to the new folder
         service.files().update(
             fileId=file_id,
@@ -353,45 +362,50 @@ def move_file_to_folder(service, file_id: str, file_name: str, source_folder_id:
             removeParents=previous_parents,
             fields='id, parents'
         ).execute()
-        
+
         print(f"  ✅ Moved to archive: {file_name}")
-        
+        core.log(f"Google Drive: Moved {file_name} to archive folder")
+
     except HttpError as error:
+        core.log(f"ERROR: Failed to move {file_name} to archive: {error}")
         raise Exception(f"Error moving file {file_name}: {error}")
 
 
 def download_and_archive_pdfs(service, folder_id: str, pdf_files: list) -> dict:
     """
     Download PDFs to local ./in folder and move them to date-stamped folders in Google Drive.
-    
+
     Args:
         service: Google Drive service object
         folder_id: The ID of the source folder
         pdf_files: List of PDF file information
-        
+
     Returns:
         dict: Summary of operations
     """
     from datetime import datetime
-    
+
     if not pdf_files:
         print("\n⚠️  No PDF files to process")
+        core.log("Google Drive: No PDF files to process")
         return {
             'downloaded': 0,
             'moved': 0,
             'failed': 0,
             'errors': []
         }
-    
+
     print(f"\n{'=' * 70}")
     print("DOWNLOADING AND ARCHIVING PDFs")
     print(f"{'=' * 70}\n")
-    
+
+    core.log(f"Google Drive: Starting download and archive of {len(pdf_files)} PDF(s)")
+
     downloaded_count = 0
     moved_count = 0
     failed_count = 0
     errors = []
-    
+
     # Group files by creation date
     files_by_date = {}
     for file_info in pdf_files:
@@ -403,50 +417,56 @@ def download_and_archive_pdfs(service, folder_id: str, pdf_files: list) -> dict:
         else:
             # Fallback to today's date
             date_str = datetime.now().strftime('%Y-%m-%d')
-        
+
         if date_str not in files_by_date:
             files_by_date[date_str] = []
-        
+
         files_by_date[date_str].append(file_info)
-    
+
     print(f"📊 Found PDFs from {len(files_by_date)} different date(s)\n")
-    
+    core.log(f"Google Drive: Found PDFs from {len(files_by_date)} different date(s)")
+
     # Process each date group
     for date_str, files in files_by_date.items():
         print(f"📅 Processing files from {date_str} ({len(files)} file(s)):")
-        
+        core.log(f"Google Drive: Processing {len(files)} file(s) from {date_str}")
+
         # Create or get the dated folder
         try:
             dated_folder_id = create_or_get_dated_folder(service, folder_id, date_str)
         except Exception as e:
             error_msg = f"Failed to create/get folder for {date_str}: {e}"
             print(f"  ❌ {error_msg}")
+            core.log(f"ERROR: {error_msg}")
             errors.append(error_msg)
             failed_count += len(files)
             continue
-        
+
         # Download and move each file
         for file_info in files:
             file_id = file_info['id']
             file_name = file_info['name']
-            
+
             try:
                 # Download to local ./in folder
                 download_pdf(service, file_id, file_name)
                 downloaded_count += 1
-                
+
                 # Move to dated folder in Google Drive
                 move_file_to_folder(service, file_id, file_name, folder_id, dated_folder_id)
                 moved_count += 1
-                
+
             except Exception as e:
                 error_msg = f"Failed to process {file_name}: {e}"
                 print(f"  ❌ {error_msg}")
+                core.log(f"ERROR: {error_msg}")
                 errors.append(error_msg)
                 failed_count += 1
-        
+
         print()  # Blank line between date groups
-    
+
+    core.log(f"Google Drive: Download complete - {downloaded_count} downloaded, {moved_count} archived, {failed_count} failed")
+
     return {
         'downloaded': downloaded_count,
         'moved': moved_count,

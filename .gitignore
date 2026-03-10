@@ -4,8 +4,10 @@ __pycache__
 in/*
 out/*
 archive/*
-log.log
+*.log
 
 test/
 creds.json
 polar*.json
+*claude*
+.claude/

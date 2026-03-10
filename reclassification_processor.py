@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import logging
+from slusdlib import core
 
 # Configure logging
 logging.basicConfig(
@@ -72,14 +73,17 @@ class ReclassificationProcessor:
         pdf_files = list(self.input_dir.glob("*.pdf"))
         if not pdf_files:
             logger.warning(f"No PDF files found in {self.input_dir}")
+            core.log(f"PDF Processing: No PDF files found in {self.input_dir}")
             return {}
-        
+
+        core.log(f"PDF Processing: Found {len(pdf_files)} PDF file(s) to process")
         all_documents = []
         for pdf_file in pdf_files:
             logger.info(f"Processing {pdf_file.name}...")
+            core.log(f"PDF Processing: Processing {pdf_file.name}")
             documents = self._process_pdf_file(pdf_file)
             all_documents.extend(documents)
-        
+
         # Group documents by student
         return self._group_by_student(all_documents)
     
@@ -361,13 +365,15 @@ class ReclassificationProcessor:
         created_files = []
         incomplete_students = []
         completed_students = []
-        
+
+        core.log(f"PDF Processing: Creating combined PDFs for {len(student_documents)} student(s)")
+
         required_docs = {
             'Teacher Recommendation Form',
-            'Reclassification Meeting', 
+            'Reclassification Meeting',
             'Notification of English Language Program Exit'
         }
-        
+
         for student_id, docs in student_documents.items():
             # Find the best student name from all documents (prioritize non-"Unknown" names)
             student_name = "Unknown"
@@ -386,11 +392,11 @@ class ReclassificationProcessor:
                 try:
                     output_filename = f"{student_id}_{student_name.replace(' ', '_')}_Reclassification_Paperwork.pdf"
                     output_path = self.output_dir / output_filename
-                    
+
                     sorted_docs = self._sort_documents_by_priority(docs)
                     self._combine_documents(sorted_docs, output_path)
                     created_files.append(str(output_path))
-                    
+
                     # Track completed student info
                     completed_students.append({
                         'student_id': student_id,
@@ -398,11 +404,13 @@ class ReclassificationProcessor:
                         'completed_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         'output_file': output_filename
                     })
-                    
+
                     logger.info(f"Created complete PDF for {student_name} (ID: {student_id}): {output_filename}")
-                
+                    core.log(f"PDF Processing: Created complete PDF for {student_name} (ID: {student_id})")
+
                 except Exception as e:
                     logger.error(f"Error creating combined PDF for student {student_id}: {e}")
+                    core.log(f"ERROR: PDF Processing - Failed to create PDF for student {student_id}: {e}")
                     incomplete_students.append({
                         'student_id': student_id,
                         'student_name': student_name,
@@ -420,9 +428,11 @@ class ReclassificationProcessor:
                     'missing_documents': list(missing_docs),
                     'total_pages': sum(doc.page_count for doc in docs)
                 })
-                
+
                 logger.warning(f"Incomplete paperwork for {student_name} (ID: {student_id}). Missing: {', '.join(missing_docs)}")
-        
+                core.log(f"PDF Processing: Incomplete paperwork for {student_name} (ID: {student_id}). Missing: {', '.join(missing_docs)}")
+
+        core.log(f"PDF Processing: Complete - {len(created_files)} complete, {len(incomplete_students)} incomplete")
         return created_files, incomplete_students, completed_students
     
     def _extract_student_name_from_docs(self, student_id: str, docs: List[DocumentInfo]) -> str:
@@ -589,37 +599,44 @@ class ReclassificationProcessor:
     def run(self) -> Dict:
         """Main processing method"""
         logger.info("Starting Reclassification Paperwork Processing")
-        
+        core.log("PDF Processing: Starting Reclassification Paperwork Processing")
+
         student_documents = self.process_pdfs()
-        
+
         if not student_documents:
             logger.warning("No documents found to process")
+            core.log("PDF Processing: No documents found to process")
             return {
-                'status': 'NO_DOCUMENTS', 
-                'total_students': 0, 
-                'created_files': [], 
+                'status': 'NO_DOCUMENTS',
+                'total_students': 0,
+                'created_files': [],
                 'csv_files': {
                     'missing': None,
                     'completed': None
                 }
             }
-        
+
         created_files, incomplete_students, completed_students = self.create_combined_pdfs(student_documents)
-        
+
         # Export CSV files
         csv_files = {}
-        
+
         # Always recreate missing paperwork CSV (or clear it if no incomplete students)
         csv_files['missing'] = self.export_missing_paperwork_csv(incomplete_students)
-        
+
         # Append to completed students CSV (maintains history, no duplicates)
         csv_files['completed'] = self.export_completed_students_csv(completed_students)
-        
+
         logger.info(f"Processing Summary:")
         logger.info(f"Total students found: {len(student_documents)}")
         logger.info(f"Complete sets processed: {len(created_files)}")
         logger.info(f"Incomplete sets: {len(incomplete_students)}")
-        
+
+        core.log(f"PDF Processing Summary:")
+        core.log(f"  - Total students found: {len(student_documents)}")
+        core.log(f"  - Complete sets processed: {len(created_files)}")
+        core.log(f"  - Incomplete sets: {len(incomplete_students)}")
+
         return {
             'status': 'SUCCESS' if created_files else 'INCOMPLETE_DOCUMENTS',
             'total_students': len(student_documents),

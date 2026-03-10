@@ -12,6 +12,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 import os
+from slusdlib import core
 
 
 def extract_spreadsheet_id(sheet_url: str) -> str:
@@ -82,54 +83,60 @@ def get_sheets_service(creds_file: str):
 def get_completed_students_from_sheet(service, spreadsheet_id: str, sheet_name: str = 'Sheet1') -> List[str]:
     """
     Get list of student IDs that are already completed from Google Sheet.
-    
+
     Args:
         service: Google Sheets service object
         spreadsheet_id: The ID of the spreadsheet
         sheet_name: Name of the sheet/tab (default: 'Sheet1')
-        
+
     Returns:
         List of student IDs as strings
     """
     try:
+        core.log(f"Google Sheets: Reading completed students from sheet '{sheet_name}'")
         # Read the first column (Student ID) from row 2 onwards (skip header)
         range_name = f'{sheet_name}!A2:A'
-        
+
         result = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
             range=range_name
         ).execute()
-        
+
         values = result.get('values', [])
-        
+
         # Extract student IDs and convert to strings
         student_ids = [str(row[0]).strip() for row in values if row]
-        
+
+        core.log(f"Google Sheets: Found {len(student_ids)} completed student(s)")
         return student_ids
-        
+
     except HttpError as error:
         if error.resp.status == 404:
+            core.log(f"ERROR: Google Sheets - Spreadsheet or sheet '{sheet_name}' not found")
             raise Exception(f"Spreadsheet or sheet '{sheet_name}' not found. Make sure the sheet exists and is shared with the service account.")
+        core.log(f"ERROR: Google Sheets - Error reading: {error}")
         raise Exception(f"Error reading from Google Sheet: {error}")
 
 
 def append_completed_students_to_sheet(service, spreadsheet_id: str, students: List[Dict], sheet_name: str = 'Sheet1'):
     """
     Append newly completed students to the Google Sheet.
-    
+
     Args:
         service: Google Sheets service object
         spreadsheet_id: The ID of the spreadsheet
         students: List of student dictionaries with keys: student_id, student_name, completed_date, output_file
         sheet_name: Name of the sheet/tab (default: 'Sheet1')
-        
+
     Returns:
         int: Number of rows appended
     """
     try:
         if not students:
             return 0
-        
+
+        core.log(f"Google Sheets: Appending {len(students)} student(s) to sheet")
+
         # Prepare rows to append
         rows = []
         for student in students:
@@ -139,14 +146,14 @@ def append_completed_students_to_sheet(service, spreadsheet_id: str, students: L
                 student['completed_date'],
                 student['output_file']
             ])
-        
+
         # Append to sheet
         range_name = f'{sheet_name}!A:D'
-        
+
         body = {
             'values': rows
         }
-        
+
         result = service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
             range=range_name,
@@ -154,10 +161,13 @@ def append_completed_students_to_sheet(service, spreadsheet_id: str, students: L
             insertDataOption='INSERT_ROWS',
             body=body
         ).execute()
-        
-        return result.get('updates', {}).get('updatedRows', 0)
-        
+
+        updated_rows = result.get('updates', {}).get('updatedRows', 0)
+        core.log(f"Google Sheets: Successfully appended {updated_rows} row(s)")
+        return updated_rows
+
     except HttpError as error:
+        core.log(f"ERROR: Google Sheets - Error appending: {error}")
         raise Exception(f"Error appending to Google Sheet: {error}")
 
 
@@ -205,13 +215,13 @@ def initialize_sheet_if_needed(service, spreadsheet_id: str, sheet_name: str = '
 def sync_completed_students(creds_file: str, spreadsheet_url: str, new_students: List[Dict], sheet_name: str = 'Sheet1') -> Dict:
     """
     Main function to sync completed students with Google Sheet.
-    
+
     Args:
         creds_file: Path to service account credentials
         spreadsheet_url: URL of the Google Sheet
         new_students: List of newly completed student dictionaries
         sheet_name: Name of the sheet/tab (default: 'Sheet1')
-        
+
     Returns:
         Dict with sync results
     """
@@ -219,61 +229,70 @@ def sync_completed_students(creds_file: str, spreadsheet_url: str, new_students:
         print("\n" + "=" * 70)
         print("SYNCING COMPLETED STUDENTS WITH GOOGLE SHEET")
         print("=" * 70)
-        
+
+        core.log("Google Sheets: Starting sync of completed students")
+
         # Extract spreadsheet ID
         spreadsheet_id = extract_spreadsheet_id(spreadsheet_url)
         print(f"📊 Spreadsheet ID: {spreadsheet_id}")
-        
+        core.log(f"Google Sheets: Spreadsheet ID: {spreadsheet_id}")
+
         # Get Sheets service
         print("🔑 Authenticating with Google Sheets...")
         service = get_sheets_service(creds_file)
         print("✅ Authentication successful")
-        
+        core.log("Google Sheets: Authentication successful")
+
         # Initialize sheet if needed
         initialize_sheet_if_needed(service, spreadsheet_id, sheet_name)
-        
+
         # Get existing completed students
         print(f"\n📖 Reading existing completed students from sheet...")
         existing_ids = get_completed_students_from_sheet(service, spreadsheet_id, sheet_name)
         print(f"📋 Found {len(existing_ids)} existing completed student(s)")
-        
+
         # Filter out students that are already in the sheet
         students_to_add = [
             student for student in new_students
             if str(student['student_id']) not in existing_ids
         ]
-        
+
         if not students_to_add:
             print("\n⏭️  All students already exist in the sheet - no updates needed")
+            core.log("Google Sheets: All students already in sheet - no updates needed")
             return {
                 'existing_count': len(existing_ids),
                 'added_count': 0,
                 'skipped_count': len(new_students),
                 'total_count': len(existing_ids)
             }
-        
+
         # Append new students
         print(f"\n➕ Appending {len(students_to_add)} new student(s) to sheet...")
         rows_added = append_completed_students_to_sheet(service, spreadsheet_id, students_to_add, sheet_name)
-        
+
         print(f"\n✅ Successfully added {rows_added} student(s) to Google Sheet")
-        
+
         if len(new_students) > len(students_to_add):
             skipped = len(new_students) - len(students_to_add)
             print(f"⏭️  Skipped {skipped} student(s) (already in sheet)")
-        
+            core.log(f"Google Sheets: Skipped {skipped} student(s) (already in sheet)")
+
         print(f"📊 Total completed students in sheet: {len(existing_ids) + rows_added}")
         print("=" * 70)
-        
+
+        core.log(f"Google Sheets: Sync complete - added {rows_added}, total {len(existing_ids) + rows_added}")
+
         return {
             'existing_count': len(existing_ids),
             'added_count': rows_added,
             'skipped_count': len(new_students) - len(students_to_add),
             'total_count': len(existing_ids) + rows_added
         }
-        
+
     except Exception as e:
         print(f"\n❌ Error syncing with Google Sheet: {e}")
+        core.log(f"ERROR: Google Sheets sync failed: {e}")
         import traceback
         traceback.print_exc()
         raise
