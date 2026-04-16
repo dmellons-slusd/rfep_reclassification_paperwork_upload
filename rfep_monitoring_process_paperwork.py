@@ -28,16 +28,16 @@ UPLOAD_LOG_PATH = Path("out/RFEP_MONITOR/MONITORING_UPLOAD_LOG.csv")
 
 
 class MonitoringProcessor:
-    """Processor for RFEP Monitoring Window 2 paperwork"""
+    """Processor for RFEP Monitoring Window paperwork"""
 
     HEADER_PATTERN = re.compile(
-        r'RFEP\s+Monitoring\s+W\s*indow\s+2.*Form Name:\s*RFEP Monitoring Form',
+        r'RFEP\s+Monitoring\s+W\s*indow\s+(\d+).*Form Name:\s*RFEP Monitoring Form',
         re.DOTALL | re.IGNORECASE,
     )
 
     def __init__(
         self,
-        input_dir: str = "RFEP_Monitoring_Window/RFEP Monitoring Window 2",
+        input_dir: str = f"RFEP_Monitoring_Window/RFEP Monitoring Window {window}",
         output_dir: str = "out/RFEP_MONITOR",
     ):
         self.input_dir = Path(input_dir)
@@ -78,13 +78,15 @@ class MonitoringProcessor:
                 header_pages = []
                 for page_num in range(total_pages):
                     text = reader.pages[page_num].extract_text() or ""
-                    if self.HEADER_PATTERN.search(text):
-                        info = self._extract_student_info(text)
+                    match = self.HEADER_PATTERN.search(text)
+                    if match:
+                        info = self._extract_student_info(text, match)
                         if info:
                             header_pages.append({
                                 'page_num': page_num,
                                 'student_id': info['student_id'],
                                 'student_name': info['student_name'],
+                                'window_num': info['window_num'],
                             })
 
                 # Determine page ranges per student
@@ -96,6 +98,7 @@ class MonitoringProcessor:
                         'pdf_path': str(pdf_path),
                         'student_id': header['student_id'],
                         'student_name': header['student_name'],
+                        'window_num': header['window_num'],
                         'pages': pages,
                     })
                     logger.debug(f"Student {header['student_id']} ({header['student_name']}): pages {start+1}-{end}")
@@ -106,8 +109,10 @@ class MonitoringProcessor:
 
         return students
 
-    def _extract_student_info(self, text: str) -> Optional[Dict[str, str]]:
-        """Extract student ID and name from a header page."""
+    def _extract_student_info(self, text: str, header_match: re.Match) -> Optional[Dict[str, str]]:
+        """Extract student ID, name, and window number from a header page."""
+        window_num = header_match.group(1)
+
         # Student ID
         id_match = re.search(r'Student ID[#:\s]*(\d{5,6})', text, re.IGNORECASE)
         if not id_match:
@@ -123,7 +128,7 @@ class MonitoringProcessor:
             if len(name) > 2 and not any(ch.isdigit() for ch in name):
                 student_name = name
 
-        return {'student_id': student_id, 'student_name': student_name}
+        return {'student_id': student_id, 'student_name': student_name, 'window_num': window_num}
 
     def create_per_student_pdfs(self, students: List[Dict]) -> List[str]:
         """Create individual PDFs per student. Returns list of output file paths."""
@@ -140,7 +145,7 @@ class MonitoringProcessor:
                     for student in student_list:
                         output_filename = (
                             f"{student['student_id']}_{student['student_name'].replace(' ', '_')}"
-                            f"_RFEP_Monitoring_Window_{window}_Document.pdf"
+                            f"_RFEP_Monitoring_Window_{student['window_num']}_Document.pdf"
                         )
                         output_path = self.output_dir / output_filename
 
@@ -163,20 +168,20 @@ class MonitoringProcessor:
         return created_files
 
 
-def get_previously_uploaded_ids() -> List[str]:
-    """Get list of previously uploaded student IDs from the local upload log CSV."""
+def get_previously_uploaded_keys() -> set:
+    """Get set of (student_id, window) tuples from the local upload log CSV."""
     try:
         if not UPLOAD_LOG_PATH.exists():
             print("No upload log found - starting fresh")
-            return []
+            return set()
         with open(UPLOAD_LOG_PATH, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            ids = [row['Student ID'] for row in reader]
-        print(f"Found {len(ids)} previously uploaded student(s) in upload log")
-        return ids
+            keys = {(row['Student ID'], row.get('Window', '')) for row in reader}
+        print(f"Found {len(keys)} previously uploaded student(s) in upload log")
+        return keys
     except Exception as e:
         print(f"Error reading upload log: {e}")
-        return []
+        return set()
 
 
 def upload_created_files(created_files: List[str], test_run: bool = False):
@@ -238,8 +243,8 @@ def upload_created_files(created_files: List[str], test_run: bool = False):
         return [], [], errors
 
     # Get previously completed students
-    previous_student_ids = get_previously_uploaded_ids()
-    core.log(f"Found {len(previous_student_ids)} previously completed students")
+    previous_student_keys = get_previously_uploaded_keys()
+    core.log(f"Found {len(previous_student_keys)} previously completed students")
 
     success_files = []
     newly_uploaded = []
@@ -253,15 +258,18 @@ def upload_created_files(created_files: List[str], test_run: bool = False):
         parts = basename.split('_')
         student_id = parts[0]
 
-        # Extract student name from filename
+        # Extract student name and window number from filename
         try:
             rfep_idx = parts.index('RFEP')
             student_name = ' '.join(parts[1:rfep_idx])
         except ValueError:
             student_name = ' '.join(parts[1:-1]) if len(parts) > 2 else 'Unknown'
 
+        win_match = re.search(r'_RFEP_Monitoring_Window_(\d+)_Document', basename)
+        student_window = win_match.group(1) if win_match else str(window)
+
         # Check if already completed
-        if student_id in previous_student_ids:
+        if (student_id, student_window) in previous_student_keys:
             print(f"  Skipping student ID {student_id} ({student_name}) - already completed")
             core.log(f"Skipping student {student_id} ({student_name}) - already completed")
             skipped_count += 1
@@ -300,6 +308,7 @@ def upload_created_files(created_files: List[str], test_run: bool = False):
                 newly_uploaded.append({
                     'student_id': student_id,
                     'student_name': student_name,
+                    'window_num': student_window,
                     'completed_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'output_file': os.path.basename(file_path),
                 })
@@ -421,28 +430,31 @@ def main():
             print("=" * 70)
             logger.info("STEP 3: Updating upload log")
 
-            existing_ids = set()
+            existing_keys = set()
             if UPLOAD_LOG_PATH.exists():
                 with open(UPLOAD_LOG_PATH, 'r', newline='', encoding='utf-8') as csvfile:
                     reader = csv.DictReader(csvfile)
                     for row in reader:
-                        existing_ids.add(row['Student ID'])
+                        existing_keys.add((row['Student ID'], row.get('Window', '')))
 
             UPLOAD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             write_header = not UPLOAD_LOG_PATH.exists() or os.path.getsize(UPLOAD_LOG_PATH) == 0
             newly_added_count = 0
 
             with open(UPLOAD_LOG_PATH, 'a', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['Student ID', 'Student Name', 'Completed Date', 'Output File']
+                fieldnames = ['Student ID', 'Student Name', 'Window', 'Completed Date', 'Output File']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 if write_header:
                     writer.writeheader()
                 for student in newly_uploaded:
                     student_id_str = str(student['student_id'])
-                    if student_id_str not in existing_ids:
+                    student_window = student.get('window_num', str(window))
+                    key = (student_id_str, student_window)
+                    if key not in existing_keys:
                         writer.writerow({
                             'Student ID': student_id_str,
                             'Student Name': student['student_name'],
+                            'Window': student_window,
                             'Completed Date': student['completed_date'],
                             'Output File': student['output_file'],
                         })
