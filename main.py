@@ -17,13 +17,19 @@ import logging
 import traceback
 
 # Configure logging
+# Anchor the log file to the script directory so it doesn't get created in the
+# caller's CWD when run from Task Scheduler / cron / another working dir.
+LOG_FILE = Path(__file__).parent / 'log.log'
+# force=True removes any handlers an earlier import (e.g. slusdlib.core.log)
+# may have attached to the root logger, guaranteeing our FileHandler is active.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('log.log'),
+        logging.FileHandler(str(LOG_FILE), encoding='utf-8'),
         logging.StreamHandler()  # Also print to console
-    ]
+    ],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -453,46 +459,55 @@ def upload_csv_reports_to_drive(service, folder_id: str):
     """
     try:
         from googleapiclient.http import MediaFileUpload
-        
+
         print("\n" + "=" * 70)
         print("UPLOADING REPORTS TO GOOGLE DRIVE")
         print("=" * 70)
-        
+        logger.info("=" * 70)
+        logger.info("UPLOADING REPORTS TO GOOGLE DRIVE")
+        logger.info("=" * 70)
+
         csv_files = {
             'out/completed_students.csv': 'Completed Students Report',
             'out/missing_paperwork.csv': 'Missing Paperwork Report'
         }
-        
+
         uploaded_count = 0
-        
+
         for file_path, description in csv_files.items():
             if not os.path.exists(file_path):
-                print(f"⏭️  Skipping {description} (file not found)")
+                msg = f"Skipping {description} (file not found)"
+                print(f"⏭️  {msg}")
+                logger.info(msg)
                 continue
-            
+
             try:
                 file_name = os.path.basename(file_path)
-                
+
                 # Check if file already exists in the folder
                 query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
                 results = service.files().list(
                     q=query,
                     spaces='drive',
-                    fields='files(id, name)'
+                    fields='files(id, name)',
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
                 ).execute()
-                
+
                 existing_files = results.get('files', [])
-                
+
                 media = MediaFileUpload(file_path, mimetype='text/csv', resumable=True)
-                
+
                 if existing_files:
                     # Update existing file
                     file_id = existing_files[0]['id']
                     service.files().update(
                         fileId=file_id,
-                        media_body=media
+                        media_body=media,
+                        supportsAllDrives=True
                     ).execute()
                     print(f"✅ Updated: {file_name}")
+                    logger.info(f"Updated on Drive: {file_name}")
                 else:
                     # Create new file
                     file_metadata = {
@@ -502,22 +517,27 @@ def upload_csv_reports_to_drive(service, folder_id: str):
                     service.files().create(
                         body=file_metadata,
                         media_body=media,
-                        fields='id'
+                        fields='id',
+                        supportsAllDrives=True
                     ).execute()
                     print(f"✅ Uploaded: {file_name}")
-                
+                    logger.info(f"Uploaded to Drive: {file_name}")
+
                 uploaded_count += 1
-                
+
             except Exception as e:
-                print(f"❌ Failed to upload {description}: {e}")
-        
+                msg = f"Failed to upload {description}: {e}"
+                print(f"❌ {msg}")
+                logger.error(msg)
+
         print(f"\n📊 Successfully uploaded {uploaded_count} report(s) to Google Drive")
         print("=" * 70)
-        
+        logger.info(f"Successfully uploaded {uploaded_count} report(s) to Google Drive")
+
     except Exception as e:
-        print(f"\n❌ Error uploading reports to Google Drive: {e}")
-        import traceback
-        traceback.print_exc()
+        msg = f"Error uploading reports to Google Drive: {e}"
+        print(f"\n❌ {msg}")
+        logger.exception(msg)
 
 def main():
     """Main function for standalone execution"""
@@ -601,8 +621,20 @@ def main():
             logger.info(f"Successfully uploaded {len(newly_uploaded)} NEW student(s):")
             for student in newly_uploaded:
                 logger.info(f"  - Student ID {student['student_id']}: {student['student_name']} (File: {student['output_file']})")
+
+            # Also write a clearly-marked block to log.log via core.log so the
+            # list is easy to find alongside the Google Sheet record.
+            core.log("===== NEWLY COMPLETED STUDENTS =====")
+            core.log(f"Count: {len(newly_uploaded)} | Run: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            for student in newly_uploaded:
+                core.log(
+                    f"NEW_STUDENT | id={student['student_id']} | name={student['student_name']} "
+                    f"| completed={student['completed_date']} | file={student['output_file']}"
+                )
+            core.log("===== END NEWLY COMPLETED STUDENTS =====")
         else:
             logger.info("No new students to upload - all were previously completed")
+            core.log("NEW_STUDENTS: none (all processed students were previously completed)")
         
         # Log skipped students
         skipped_count = len(created_files) - len(newly_uploaded)

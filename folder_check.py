@@ -211,7 +211,9 @@ def count_pdfs_in_folder(service, folder_id: str) -> dict:
                 spaces='drive',
                 fields='nextPageToken, files(id, name, size, createdTime, modifiedTime)',
                 pageToken=page_token,
-                pageSize=100  # Retrieve up to 100 files per request
+                pageSize=100,  # Retrieve up to 100 files per request
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
 
             files = results.get('files', [])
@@ -259,7 +261,7 @@ def download_pdf(service, file_id: str, file_name: str, destination_folder: str 
         os.makedirs(destination_folder, exist_ok=True)
 
         # Get file content
-        request = service.files().get_media(fileId=file_id)
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
 
         # Prepare file path
         file_path = os.path.join(destination_folder, file_name)
@@ -304,9 +306,11 @@ def create_or_get_dated_folder(service, parent_folder_id: str, date_str: str) ->
         results = service.files().list(
             q=query,
             spaces='drive',
-            fields='files(id, name)'
+            fields='files(id, name)',
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
-        
+
         folders = results.get('files', [])
         
         if folders:
@@ -324,7 +328,8 @@ def create_or_get_dated_folder(service, parent_folder_id: str, date_str: str) ->
             
             folder = service.files().create(
                 body=file_metadata,
-                fields='id, name'
+                fields='id, name',
+                supportsAllDrives=True
             ).execute()
             
             folder_id = folder.get('id')
@@ -350,7 +355,8 @@ def move_file_to_folder(service, file_id: str, file_name: str, source_folder_id:
         # Retrieve the existing parents to remove
         file = service.files().get(
             fileId=file_id,
-            fields='parents'
+            fields='parents',
+            supportsAllDrives=True
         ).execute()
 
         previous_parents = ",".join(file.get('parents', []))
@@ -360,7 +366,8 @@ def move_file_to_folder(service, file_id: str, file_name: str, source_folder_id:
             fileId=file_id,
             addParents=destination_folder_id,
             removeParents=previous_parents,
-            fields='id, parents'
+            fields='id, parents',
+            supportsAllDrives=True
         ).execute()
 
         print(f"  ✅ Moved to archive: {file_name}")
