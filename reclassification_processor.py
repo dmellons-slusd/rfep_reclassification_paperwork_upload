@@ -57,7 +57,26 @@ class ReclassificationProcessor:
             'title': 'Notification of English Language Program Exit'
         }
     }
-    
+
+    # Legacy Ellevation forms (from the one-time old_docs backfill). These map onto the
+    # same teacher/meeting titles as the normal forms so they're interchangeable, plus a
+    # distinct RFEP Monitoring type. Patterns match ONLY Ellevation text, so normal
+    # SLUSD forms are never affected. Checked after DOCUMENT_PATTERNS.
+    ELLEVATION_PATTERNS = {
+        'legacy_teacher_rec': {
+            'pattern': r'EL Reclassification Recomm',
+            'title': 'Teacher Recommendation Form'
+        },
+        'legacy_meeting': {
+            'pattern': r'Purpose:\s*Reclassification Meeting',
+            'title': 'Reclassification Meeting'
+        },
+        'legacy_monitoring': {
+            'pattern': r'RFEP Student Monitoring',
+            'title': 'RFEP Monitoring'
+        },
+    }
+
     def __init__(self, input_dir: str = "in", output_dir: str = "out"):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
@@ -151,13 +170,19 @@ class ReclassificationProcessor:
         # Normalize ligatures first
         text = self._normalize_ligatures(text)
         
-        # Find document type
+        # Find document type (normal SLUSD forms first, then legacy Ellevation forms)
         document_type = None
         for doc_key, doc_info in self.DOCUMENT_PATTERNS.items():
             if re.search(doc_info['pattern'], text, re.IGNORECASE):
                 document_type = doc_info['title']
                 break
-        
+
+        if not document_type:
+            for doc_key, doc_info in self.ELLEVATION_PATTERNS.items():
+                if re.search(doc_info['pattern'], text, re.IGNORECASE):
+                    document_type = doc_info['title']
+                    break
+
         if not document_type:
             return None
         
@@ -171,6 +196,10 @@ class ReclassificationProcessor:
             r'学号[#:\s]*(\d{5})',
             r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{6})',
             r'N°\s*de\s*identificación\s*del\s*estudiante[#:\s]*(\d{5})',
+            # Legacy Ellevation forms ("Student #:" / "Local ID"). Listed last so the
+            # normal SLUSD "Student ID#:" patterns always take precedence on normal forms.
+            r'Student\s*#:\s*(\d{4,6})',
+            r'Local ID\s*(\d{4,6})',
         ]
         
         student_id = None
@@ -373,6 +402,15 @@ class ReclassificationProcessor:
             'Reclassification Meeting',
             'Notification of English Language Program Exit'
         }
+        # Legacy old_docs packets complete on the Ellevation set, where RFEP Monitoring
+        # stands in for the Notification of Exit that legacy paperwork never had. A normal
+        # student can NEVER satisfy this set because RFEP Monitoring only exists in
+        # Ellevation forms, so normal-student completion is unchanged.
+        legacy_required_docs = {
+            'Teacher Recommendation Form',
+            'Reclassification Meeting',
+            'RFEP Monitoring'
+        }
 
         for student_id, docs in student_documents.items():
             # Find the best student name from all documents (prioritize non-"Unknown" names)
@@ -387,8 +425,8 @@ class ReclassificationProcessor:
                 student_name = self._extract_student_name_from_docs(student_id, docs)
             
             found_doc_types = {doc.document_type for doc in docs}
-            
-            if required_docs.issubset(found_doc_types):
+
+            if required_docs.issubset(found_doc_types) or legacy_required_docs.issubset(found_doc_types):
                 try:
                     output_filename = f"{student_id}_{student_name.replace(' ', '_')}_Reclassification_Paperwork.pdf"
                     output_path = self.output_dir / output_filename
@@ -420,7 +458,10 @@ class ReclassificationProcessor:
                         'total_pages': sum(doc.page_count for doc in docs)
                     })
             else:
-                missing_docs = required_docs - found_doc_types
+                # Report whichever required set this student is closest to completing.
+                missing_normal = required_docs - found_doc_types
+                missing_legacy = legacy_required_docs - found_doc_types
+                missing_docs = missing_legacy if len(missing_legacy) < len(missing_normal) else missing_normal
                 incomplete_students.append({
                     'student_id': student_id,
                     'student_name': student_name,
@@ -568,6 +609,7 @@ class ReclassificationProcessor:
             'Notification of English Language Program Exit': 1,
             'Reclassification Meeting': 2,
             'Teacher Recommendation Form': 3,
+            'RFEP Monitoring': 4,
         }
         
         return sorted(docs, key=lambda x: (order_priority.get(x.document_type, 999), x.document_type))
